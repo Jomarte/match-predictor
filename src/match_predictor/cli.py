@@ -10,6 +10,7 @@ from .api import FootballDataClient, fetch_competition_matches
 from .data import load_processed_matches, rebuild_processed_csv
 from .features import build_feature_frame
 from .model import (
+    backtest_xgboost_grid,
     default_curve_plot_path,
     default_curve_path,
     default_metrics_path,
@@ -17,6 +18,7 @@ from .model import (
     load_model,
     predict_features,
     train_model,
+    train_final_xgboost,
     train_temporal_xgboost,
 )
 
@@ -99,6 +101,64 @@ def _train_temporal(args: argparse.Namespace) -> None:
         f"final accuracy={metrics['accuracy']:.3f} log_loss={metrics['log_loss']:.3f} "
         f"device={metrics['device']} train_rows={metrics['train_rows']} "
         f"test_rows={metrics['test_rows']}"
+    )
+
+
+def _parse_int_list(value: str) -> list[int]:
+    return [int(item.strip()) for item in value.split(",") if item.strip()]
+
+
+def _parse_float_list(value: str) -> list[float]:
+    return [float(item.strip()) for item in value.split(",") if item.strip()]
+
+
+def _backtest_xgboost(args: argparse.Namespace) -> None:
+    processed_csv = args.processed_csv or _processed_path(args.data_dir, args.competition)
+    output_path = args.output_path or (
+        args.models_dir / f"{args.competition.upper()}_backtest_grid.csv"
+    )
+    result = backtest_xgboost_grid(
+        processed_csv=processed_csv,
+        output_path=output_path,
+        last_n=args.last_n,
+        n_estimators_values=_parse_int_list(args.n_estimators),
+        learning_rate_values=_parse_float_list(args.learning_rates),
+        max_depth_values=_parse_int_list(args.max_depths),
+        use_gpu=not args.no_gpu,
+    )
+    columns = [
+        "n_estimators",
+        "learning_rate",
+        "max_depth",
+        "folds",
+        "mean_log_loss",
+        "mean_accuracy",
+        "device",
+    ]
+    print(result[columns].head(args.top).to_string(index=False))
+    print(f"saved backtest grid {output_path}")
+
+
+def _train_final(args: argparse.Namespace) -> None:
+    processed_csv = args.processed_csv or _processed_path(args.data_dir, args.competition)
+    model_path = args.model_path or default_model_path(args.models_dir, args.competition)
+    metrics_path = args.metrics_path or default_metrics_path(args.models_dir, args.competition)
+    metrics = train_final_xgboost(
+        processed_csv=processed_csv,
+        model_path=model_path,
+        metrics_path=metrics_path,
+        last_n=args.last_n,
+        n_estimators=args.n_estimators,
+        learning_rate=args.learning_rate,
+        max_depth=args.max_depth,
+        use_gpu=not args.no_gpu,
+    )
+    print(f"saved final model {model_path}")
+    print(f"saved final metrics {metrics_path}")
+    print(
+        f"rows={metrics['rows']} n_estimators={metrics['n_estimators']} "
+        f"learning_rate={metrics['learning_rate']} max_depth={metrics['max_depth']} "
+        f"device={metrics['device']}"
     )
 
 
@@ -258,6 +318,36 @@ def build_parser() -> argparse.ArgumentParser:
     temporal.add_argument("--max-depth", type=int, default=3)
     temporal.add_argument("--no-gpu", action="store_true")
     temporal.set_defaults(func=_train_temporal)
+
+    backtest = subparsers.add_parser(
+        "backtest-xgboost",
+        help="Run temporal grid backtests to choose XGBoost hyperparameters",
+    )
+    backtest.add_argument("--competition", default=DEFAULT_COMPETITION)
+    backtest.add_argument("--processed-csv", type=Path)
+    backtest.add_argument("--output-path", type=Path)
+    backtest.add_argument("--last-n", type=int, default=5)
+    backtest.add_argument("--n-estimators", default="50,75,100,150,200")
+    backtest.add_argument("--learning-rates", default="0.02,0.03,0.05")
+    backtest.add_argument("--max-depths", default="2,3,4")
+    backtest.add_argument("--top", type=int, default=10)
+    backtest.add_argument("--no-gpu", action="store_true")
+    backtest.set_defaults(func=_backtest_xgboost)
+
+    final = subparsers.add_parser(
+        "train-final",
+        help="Train final XGBoost on all finished matches with chosen hyperparameters",
+    )
+    final.add_argument("--competition", default=DEFAULT_COMPETITION)
+    final.add_argument("--processed-csv", type=Path)
+    final.add_argument("--model-path", type=Path)
+    final.add_argument("--metrics-path", type=Path)
+    final.add_argument("--last-n", type=int, default=5)
+    final.add_argument("--n-estimators", type=int, default=100)
+    final.add_argument("--learning-rate", type=float, default=0.03)
+    final.add_argument("--max-depth", type=int, default=3)
+    final.add_argument("--no-gpu", action="store_true")
+    final.set_defaults(func=_train_final)
 
     upcoming = subparsers.add_parser("predict-upcoming", help="Predict scheduled matches")
     upcoming.add_argument("--competition", default=DEFAULT_COMPETITION)
